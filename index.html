@@ -1,180 +1,173 @@
-// ========== Voice (Web Speech API) ==========
-const micBtn = document.getElementById('micBtn');
-const micBox = document.getElementById('micBox');
-const liveText = document.getElementById('liveText');
-let recognizing = false;
-let recognition;
 
-/* 1) Helpers: digits & number-words → digits */
-const ARABIC_INDIC = { "٠":"0","١":"1","٢":"2","٣":"3","٤":"4","٥":"5","٦":"6","٧":"7","٨":"8","٩":"9" };
-function toLatinDigits(s){
-  return s.replace(/[٠-٩]/g, ch => ARABIC_INDIC[ch] ?? ch);
-}
-
-// Very small word→number parser: handles 0–9999 + decimals like “point five”
-const smallNums = {
-  "zero":0,"oh":0,"one":1,"two":2,"to":2,"too":2,"three":3,"four":4,"for":4,"five":5,"six":6,"seven":7,"eight":8,"ate":8,"nine":9,
-  "ten":10,"eleven":11,"twelve":12,"thirteen":13,"fourteen":14,"fifteen":15,"sixteen":16,"seventeen":17,"eighteen":18,"nineteen":19
-};
-const tensNums = { "twenty":20,"thirty":30,"forty":40,"fourty":40,"fifty":50,"sixty":60,"seventy":70,"eighty":80,"ninety":90 };
-const scales = { "hundred":100, "thousand":1000 };
-
-function wordsChunkToNumber(words){
-  // converts a sequence like ["forty","five","point","six","two"] => "45.62"
-  let total = 0, current = 0, i=0, hadAny=false, decimalMode=false, decimalStr="";
-  while(i<words.length){
-    const w = words[i];
-    if (w==="and"){ i++; continue; }
-
-    if (w==="point" || w==="dot"){
-      decimalMode = true; i++; continue;
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Voice Calculator</title>
+  <style>
+    body {
+      font-family: Arial;
+      background-color: #fce4ec;
+      text-align: center;
+      padding: 20px;
     }
-    if (decimalMode){
-      // digits after point: either digit words or single digits
-      if (w in smallNums){ decimalStr += String(smallNums[w]); hadAny = true; i++; continue; }
-      if (/^\d+$/.test(w)){ decimalStr += w; hadAny = true; i++; continue; }
-      break;
+    h1 {
+      color: #d81b60;
     }
-
-    if (w in smallNums){ current += smallNums[w]; hadAny = true; i++; continue; }
-    if (w in tensNums){ current += tensNums[w]; hadAny = true; i++; continue; }
-    if (w in scales){
-      current = (current||1) * scales[w];
-      hadAny = true; i++; continue;
+    .calculator {
+      display: inline-grid;
+      grid-template-columns: repeat(4, 60px);
+      gap: 10px;
+      margin-top: 20px;
     }
-    if (/^\d+$/.test(w)){ current = current*10 + parseInt(w,10); hadAny=true; i++; continue; }
-    break;
-  }
-  total += current;
-  if (!hadAny) return null;
-  const numStr = decimalMode ? (String(total) + "." + (decimalStr||"0")) : String(total);
-  return { value: numStr, used: i };
-}
-
-// Replace **contiguous** number words with digits
-function collapseNumberWords(text){
-  const tokens = text.trim().split(/\s+/);
-  const out = [];
-  for (let i=0;i<tokens.length;){
-    const slice = tokens.slice(i);
-    const parsed = wordsChunkToNumber(slice);
-    if (parsed){ out.push(parsed.value); i += parsed.used; continue; }
-    out.push(tokens[i]); i++;
-  }
-  return out.join(" ");
-}
-
-/* 2) Voice vocabulary → math tokens */
-const voiceMap = [
-  // operations (multi-word first)
-  ["multiplied by","*"],["divided by","/"],["to the power","^"],["raised to","^"],
-  ["open parenthesis","("],["open bracket","("],["left parenthesis","("],
-  ["close parenthesis",")"],["close bracket",")"],["right parenthesis",")"],
-  ["square root of","sqrt("],["root of","sqrt("],
-  ["square root","sqrt("],["root","sqrt("],
-  ["natural log","ln("],
-
-  // single tokens
-  ["plus","+"],["minus","-"],["times","*"],["multiply","*"],["into","*"],
-  ["divide","/"],["over","/"],["power","^"],["percent","%"],
-  ["point","."],["dot","."],
-  ["square","square("],["inverse","inv("],["one by","inv("],
-  ["factorial","!"],["sine","sin("],["sign","sin("],["cosine","cos("],["tangent","tan("],["tan","tan("],
-  ["log","log("],["ln","ln("],["absolute","abs("],["modulus","abs("],
-  ["pi","PI"],["pie","PI"],["e","E"],
-  ["plus or minus","neg("],["negative","neg("],
-
-  // actions
-  ["all clear","__CLR__"],["clear","__CLR__"],
-  ["backspace","__BK__"],["delete","__BK__"],
-  ["equals","__EQ__"],["equal","__EQ__"],["solve","__EQ__"],["result","__EQ__"]
-];
-
-function applyVoiceMap(text){
-  let t = " " + text.toLowerCase().trim() + " ";
-  // (a) normalize Arabic-Indic digits
-  t = toLatinDigits(t);
-  // (b) collapse number words to digits BEFORE mapping tokens
-  t = collapseNumberWords(t);
-  // (c) map phrases → symbols; longer keys first
-  const ordered = [...voiceMap].sort((a,b)=> b[0].length - a[0].length);
-  for (const [k,v] of ordered){
-    const re = new RegExp("\\b"+k.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+"\\b","g");
-    t = t.replace(re, " "+v+" ");
-  }
-  // finally trim spaces and remove internal spaces so tokens connect like "sqrt(45)"
-  return t.trim().replace(/\s+/g,"");
-}
-
-function appendVoiceTokens(norm){
-  if (norm.includes("__CLR__")) { clearAll(); norm = norm.replaceAll("__CLR__",""); }
-  if (norm.includes("__BK__"))  { doBackspace(); norm = norm.replaceAll("__BK__",""); }
-  if (!norm) return;
-
-  const endsEq = norm.endsWith("__EQ__");
-  norm = norm.replaceAll("__EQ__","");
-
-  expression += norm;
-  exprEl.textContent = expression;
-
-  try{
-    const v = evaluateExpression(balanceParens(expression)); // balanced preview
-    resultEl.textContent = formatNumber(v);
-    setStatus('Listening');
-  }catch{
-    resultEl.textContent = '…';
-    setStatus('Listening');
-  }
-
-  if (endsEq) doEquals();
-}
-
-function initSpeech(){
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR){
-    liveText.textContent = "Voice not supported in this browser";
-    micBtn.disabled = true;
-    return;
-  }
-  recognition = new SR();
-  // Pick device language; override to 'en-IN' if that works better for you:
-  recognition.lang = (navigator.language || "en-US"); // e.g. "en-IN", "en-GB"
-  recognition.interimResults = false;   // FINAL ONLY (Android tends to be noisy with interims)
-  recognition.continuous = true;
-
-  recognition.onresult = (ev)=>{
-    let spoken = "";
-    for (let i = ev.resultIndex; i < ev.results.length; i++){
-      const res = ev.results[i];
-      if (res.isFinal) spoken += (res[0].transcript + " ");
+    .btn {
+      padding: 15px;
+      font-size: 18px;
+      border: none;
+      border-radius: 8px;
+      background-color: #fff;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+      transition: background-color 0.3s;
     }
-    spoken = spoken.trim();
-    if (!spoken) return;
+    .btn.operator { background-color: #ffb74d; }
+    .btn.active { background-color: #81d4fa; }
+    .expression, .answer {
+      font-size: 22px;
+      margin-top: 20px;
+    }
+    #speak-btn {
+      margin-top: 30px;
+      padding: 15px 40px;
+      font-size: 20px;
+      background-color: #2196f3;
+      color: white;
+      border: none;
+      border-radius: 8px;
+    }
+  </style>
+</head>
+<body>
 
-    liveText.textContent = "Heard: " + spoken;
-    const norm = applyVoiceMap(spoken);
-    appendVoiceTokens(norm);
+<h1>🎤 Voice Calculator</h1>
+
+<div class="calculator" id="calc">
+  <button class="btn" id="btn-7">7</button>
+  <button class="btn" id="btn-8">8</button>
+  <button class="btn" id="btn-9">9</button>
+  <button class="btn operator" id="btn-divide">÷</button>
+
+  <button class="btn" id="btn-4">4</button>
+  <button class="btn" id="btn-5">5</button>
+  <button class="btn" id="btn-6">6</button>
+  <button class="btn operator" id="btn-multiply">×</button>
+
+  <button class="btn" id="btn-1">1</button>
+  <button class="btn" id="btn-2">2</button>
+  <button class="btn" id="btn-3">3</button>
+  <button class="btn operator" id="btn-minus">−</button>
+
+  <button class="btn" id="btn-sqrt">√</button>
+  <button class="btn" id="btn-0">0</button>
+  <button class="btn" id="btn-clear">CLR</button>
+  <button class="btn operator" id="btn-plus">+</button>
+</div>
+
+<div class="expression" id="expression">Expression: </div>
+<div class="answer" id="answer">Answer: </div>
+
+<button id="speak-btn">🎙️ Speak</button>
+
+<script>
+  const synth = window.speechSynthesis;
+  const exprDisplay = document.getElementById("expression");
+  const ansDisplay = document.getElementById("answer");
+
+  const buttonMap = {
+    "0": "btn-0", "1": "btn-1", "2": "btn-2", "3": "btn-3",
+    "4": "btn-4", "5": "btn-5", "6": "btn-6", "7": "btn-7",
+    "8": "btn-8", "9": "btn-9", "+": "btn-plus", "-": "btn-minus",
+    "*": "btn-multiply", "x": "btn-multiply", "/": "btn-divide", "sqrt": "btn-sqrt"
   };
-  recognition.onerror = (e)=> { setStatus("Mic error"); console.warn(e.error); };
-  recognition.onend = ()=> {
-    recognizing = false;
-    micBtn.setAttribute("aria-pressed","false");
-    micBox.classList.remove('active');
-    setStatus("Mic off");
-  };
-}
 
-micBtn.addEventListener('click', ()=>{
-  if (!recognition){ initSpeech(); }
-  if (!recognition) return;
-  if (recognizing){
-    recognition.stop();
-  } else {
-    recognition.start();
-    recognizing = true;
-    micBtn.setAttribute("aria-pressed","true");
-    micBox.classList.add('active');
-    setStatus("Listening…");
-    liveText.textContent = "Listening… say: “square root of forty five equals”";
+  function speak(text) {
+    const utter = new SpeechSynthesisUtterance(text);
+    synth.speak(utter);
   }
-});
+
+  function highlightButton(key) {
+    const id = buttonMap[key];
+    if (id) {
+      const btn = document.getElementById(id);
+      btn.classList.add("active");
+      setTimeout(() => btn.classList.remove("active"), 1000);
+    }
+  }
+
+  function parseSpeech(speech) {
+    speech = speech.toLowerCase();
+
+    let expr = speech
+      .replace(/plus/g, "+")
+      .replace(/minus/g, "-")
+      .replace(/times|multiply|multiplied by|x/g, "*")
+      .replace(/divided by|divide/g, "/")
+      .replace(/square root of/g, "sqrt")
+      .replace(/power of|raised to/g, "**");
+
+    return expr;
+  }
+
+  function showExpression(expr) {
+    exprDisplay.textContent = "Expression: " + expr;
+  }
+
+  function showAnswer(ans) {
+    ansDisplay.textContent = "Answer: " + ans;
+    speak("The answer is " + ans);
+  }
+
+  function calculate(expr) {
+    try {
+      if (expr.includes("sqrt")) {
+        expr = expr.replace(/sqrt ?(\d+)/g, (_, n) => `Math.sqrt(${n})`);
+      }
+      const answer = eval(expr);
+      return answer;
+    } catch {
+      return "Error";
+    }
+  }
+
+  document.getElementById("speak-btn").onclick = function () {
+    const recog = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+    recog.lang = "en-US";
+
+    recog.onresult = function (e) {
+      const speech = e.results[0][0].transcript;
+      const parsed = parseSpeech(speech);
+      showExpression(parsed);
+
+      for (const char of parsed.match(/\w+|\+|\-|\*|\/|sqrt/g)) {
+        highlightButton(char);
+      }
+
+      const result = calculate(parsed);
+      showAnswer(result);
+    };
+
+    recog.onerror = function () {
+      ansDisplay.textContent = "Error recognizing speech";
+    };
+
+    recog.start();
+  };
+
+  // Clear button
+  document.getElementById("btn-clear").onclick = () => {
+    exprDisplay.textContent = "Expression: ";
+    ansDisplay.textContent = "Answer: ";
+  };
+</script>
+
+</body>
+</html>
