@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -136,4 +137,327 @@
   // ---------- Math engine ----------
   const precedence = { "+":2, "-":2, "*":3, "/":3, "^":4, "%":5, "!":5 };
   const rightAssoc = { "^":true };
-  const funcs = new Set(["sqrt","square","cube","inv","fact","sin","cos","tan","log","ln","abs","neg","]()
+  const funcs = new Set(["sqrt","square","cube","inv","fact","sin","cos","tan","log","ln","abs","neg","percent"]);
+  const constants = { "PI":Math.PI, "E":Math.E };
+  const toRad = x => x * Math.PI / 180;
+
+  function factorial(n){
+    if (!Number.isFinite(n) || n<0 || Math.floor(n) !== n) throw new Error("Factorial on non-negative integers only");
+    let r=1; for (let i=2;i<=n;i++) r*=i; return r;
+  }
+  function applyFunc(fn, v){
+    switch(fn){
+      case "sqrt": return Math.sqrt(v);
+      case "square": return v*v;
+      case "cube": return v*v*v;
+      case "inv": return 1/v;
+      case "fact": return factorial(v);
+      case "sin": return Math.sin(TRIG_IN_DEGREES ? toRad(v) : v);
+      case "cos": return Math.cos(TRIG_IN_DEGREES ? toRad(v) : v);
+      case "tan": return Math.tan(TRIG_IN_DEGREES ? toRad(v) : v);
+      case "log": return Math.log10(v);
+      case "ln":  return Math.log(v);
+      case "abs": return Math.abs(v);
+      case "neg": return -v;
+      case "percent": return v/100;
+      default: throw new Error("Unknown function");
+    }
+  }
+  function balanceParens(s){
+    let open=0; for(const ch of s){ if(ch==='(') open++; else if(ch===')') open=Math.max(0, open-1); }
+    return open>0 ? s + ')'.repeat(open) : s;
+  }
+  function tokenize(str){
+    const s = (str||"").replace(/\s+/g,"");
+    const tokens=[], re=/([0-9]*\.?[0-9]+(?:e[+\-]?[0-9]+)?)|([A-Za-z]+)|([\+\-\*\/\^\%\!\(\)])/y;
+    let i=0;
+    while(i<s.length){
+      re.lastIndex=i; const m=re.exec(s);
+      if(!m) throw new Error("Invalid token near: "+s.slice(i,i+8));
+      if (m[1]) tokens.push({type:"num", value:m[1]});
+      else if (m[2]){
+        const name=m[2];
+        if (funcs.has(name)) tokens.push({type:"fn", value:name});
+        else if (name in constants) tokens.push({type:"const", value:name});
+        else throw new Error("Unknown symbol: "+name);
+      } else if (m[3]) tokens.push({type:"op", value:m[3]});
+      i=re.lastIndex;
+    }
+    return tokens;
+  }
+  function toRPN(tokens){
+    const out=[], stack=[]; let prev=null;
+    for (const t of tokens){
+      if (t.type==="num"||t.type==="const"){ out.push(t); }
+      else if (t.type==="fn"){ stack.push(t); }
+      else if (t.type==="op"){
+        if (t.value==="("){ stack.push(t); }
+        else if (t.value===")"){
+          while(stack.length && stack[stack.length-1].value!=="(") out.push(stack.pop());
+          if(!stack.length) throw new Error("Mismatched )");
+          stack.pop();
+          if(stack.length && stack[stack.length-1].type==="fn") out.push(stack.pop());
+        } else {
+          if (t.value==="-" && (prev===null || (prev.type==="op" && prev.value!=="") && prev.value!=="(")){
+            stack.push({type:"fn", value:"neg"});
+          } else {
+            while(stack.length){
+              const top=stack[stack.length-1];
+              if (top.type==="op" && top.value!=="("){
+                const p1=precedence[t.value]||0, p2=precedence[top.value]||0;
+                if ((rightAssoc[t.value] && p1<p2) || (!rightAssoc[t.value] && p1<=p2)) out.push(stack.pop());
+                else break;
+              } else if (top.type==="fn"){ out.push(stack.pop()); }
+              else break;
+            }
+            stack.push(t);
+          }
+        }
+      }
+      prev=t;
+    }
+    while(stack.length){
+      const x=stack.pop();
+      if (x.value==="("||x.value===")") throw new Error("Mismatched parentheses");
+      out.push(x);
+    }
+    return out;
+  }
+  function evalRPN(rpn){
+    const st=[];
+    for(const t of rpn){
+      if (t.type==="num") st.push(parseFloat(t.value));
+      else if (t.type==="const") st.push(constants[t.value]);
+      else if (t.type==="fn"){
+        if (st.length<1) throw new Error("Insufficient values");
+        const v=st.pop(); const res=applyFunc(t.value, v);
+        if (!Number.isFinite(res)) throw new Error("Math domain");
+        st.push(res);
+      } else if (t.type==="op"){
+        if (t.value==="!" || t.value==="%"){
+          if (st.length<1) throw new Error("Insufficient values");
+          const a = st.pop(); st.push(t.value==="!" ? applyFunc("fact", a) : applyFunc("percent", a));
+        } else {
+          if (st.length<2) throw new Error("Insufficient values");
+          const b=st.pop(), a=st.pop();
+          let r; switch(t.value){
+            case "+": r=a+b; break; case "-": r=a-b; break; case "*": r=a*b; break;
+            case "/": r=a/b; break; case "^": r=Math.pow(a,b); break;
+            default: throw new Error("Unknown op");
+          }
+          if (!Number.isFinite(r)) throw new Error("Math domain"); st.push(r);
+        }
+      }
+    }
+    if (st.length!==1) throw new Error("Invalid expression");
+    return st[0];
+  }
+  function evaluateExpression(expr){
+    const tokens = tokenize(expr);
+    const rpn = toRPN(tokens);
+    return evalRPN(rpn);
+  }
+  function formatNumber(n){
+    if (!Number.isFinite(n)) return "Error";
+    const abs=Math.abs(n);
+    if (abs!==0 && (abs<1e-6 || abs>=1e10)) return n.toExponential(10).replace(/\.?0+e/,'e');
+    let s=n.toFixed(12); s=s.replace(/\.?0+$/,''); return s;
+  }
+  function preview(){
+    try{
+      const v = evaluateExpression(balanceParens(expression));
+      setAns(formatNumber(v)); setStatus("OK");
+    }catch{ setAns(expression ? "…" : "0"); setStatus(expression ? "Editing" : "Ready"); }
+    setExpr(expression);
+  }
+  function pushText(t){
+    if (justEvaluated && /^[0-9.(]|PI|E/.test(t)) expression="";
+    expression += t; justEvaluated=false; preview();
+  }
+  function doEquals(){
+    try{
+      const v = evaluateExpression(balanceParens(expression));
+      const s = formatNumber(v); setAns(s); expression = s; setExpr(expression); setStatus("Solved"); justEvaluated=true;
+    }catch{ setAns("Error"); setStatus("Error"); }
+  }
+  function doBackspace(){ if (!expression) return; expression = expression.slice(0,-1); preview(); }
+  function clearAll(){ expression=""; preview(); }
+  function wrapLastWith(fn){
+    const m=/(?:PI|E|\)|\d+(?:\.\d+)?(?:e[+\-]?\d+)?|\.\d+)$/.exec(expression);
+    if (m){ const i=m.index, atom=m[0]; expression = expression.slice(0,i) + fn + "(" + atom + ")"; }
+    else { expression += fn + "("; }
+    preview();
+  }
+  function postfix(post){ if (/\d|\)|I|E$/.test(expression)){ expression += post; preview(); } }
+
+  // Buttons
+  pad.addEventListener('click', (e)=>{
+    const b = e.target.closest('button'); if (!b) return;
+    b.classList.add('active'); setTimeout(()=>b.classList.remove('active'), 220);
+    if (b.dataset.num !== undefined) pushText(b.dataset.num);
+    else if (b.dataset.op) pushText(b.dataset.op);
+    else if (b.dataset.const) pushText(b.dataset.const);
+    else if (b.dataset.fn){
+      const f=b.dataset.fn;
+      if (f==="fact") postfix("!");
+      else if (f==="percent") postfix("%");
+      else if (["square","cube","sqrt","inv","abs","sin","cos","tan","log","ln"].includes(f)) wrapLastWith(f);
+      else if (f==="neg"){ pushText("neg("); pushText(")"); }
+    } else if (b.dataset.action){
+      if (b.dataset.action==="C") clearAll();
+      else if (b.dataset.action==="BK") doBackspace();
+      else if (b.dataset.action==="EQ") doEquals();
+    }
+  });
+
+  // Text field (mobile typing)
+  exprInput.addEventListener('input', () => {
+    expression = exprInput.value;
+    preview();
+  });
+  evalBtn.addEventListener('click', doEquals);
+
+  // Hardware keyboard (desktop)
+  document.addEventListener('keydown', (e)=>{
+    // if focusing the input, let it type normally
+    if (document.activeElement === exprInput) {
+      if (e.key === "Enter") { e.preventDefault(); doEquals(); }
+      return;
+    }
+    const k=e.key;
+    if (/^[0-9.]$/.test(k)) { pushText(k); return; }
+    if ("+-*/^()".includes(k)) { pushText(k); return; }
+    if (k==="Enter" || k==="="){ e.preventDefault(); doEquals(); }
+    if (k==="Backspace"){ e.preventDefault(); doBackspace(); }
+    if (k==="%"){ postfix("%"); }
+  });
+
+  // ---------- Voice (Android-friendly) ----------
+  const micBtn = document.getElementById('speak-btn');
+  const micBox = document.getElementById('micBox');
+  const liveText = document.getElementById('liveText');
+  let recognition, recognizing=false;
+
+  const ARABIC_INDIC = {"٠":"0","١":"1","٢":"2","٣":"3","٤":"4","٥":"5","٦":"6","٧":"7","٨":"8","٩":"9"};
+  function toLatinDigits(s){ return (s||"").replace(/[٠-٩]/g, function(ch){ return ARABIC_INDIC[ch] || ch; }); }
+  const smallNums = {"zero":0,"oh":0,"one":1,"two":2,"to":2,"too":2,"three":3,"four":4,"for":4,"five":5,"six":6,"seven":7,"eight":8,"ate":8,"nine":9,"ten":10,"eleven":11,"twelve":12,"thirteen":13,"fourteen":14,"fifteen":15,"sixteen":16,"seventeen":17,"eighteen":18,"nineteen":19};
+  const tensNums = {"twenty":20,"thirty":30,"forty":40,"fourty":40,"fifty":50,"sixty":60,"seventy":70,"eighty":80,"ninety":90};
+  const scales   = {"hundred":100, "thousand":1000};
+
+  function wordsChunkToNumber(words){
+    let total=0,current=0,i=0,had=false,decimal=false,dec="";
+    while(i<words.length){
+      const w=words[i];
+      if (w==="and"){ i++; continue; }
+      if (w==="point"||w==="dot"){ decimal=true; i++; continue; }
+      if (decimal){
+        if (smallNums.hasOwnProperty(w)){ dec += String(smallNums[w]); had=true; i++; continue; }
+        if (/^\d+$/.test(w)){ dec += w; had=true; i++; continue; }
+        break;
+      }
+      if (smallNums.hasOwnProperty(w)){ current += smallNums[w]; had=true; i++; continue; }
+      if (tensNums.hasOwnProperty(w)){ current += tensNums[w]; had=true; i++; continue; }
+      if (scales.hasOwnProperty(w)){ current = (current||1)*scales[w]; had=true; i++; continue; }
+      if (/^\d+$/.test(w)){ current = current*10 + parseInt(w,10); had=true; i++; continue; }
+      break;
+    }
+    total += current;
+    if (!had) return null;
+    return { value: decimal ? (String(total)+"."+(dec||"0")) : String(total), used:i };
+  }
+  function collapseNumberWords(text){
+    const tokens=(text||"").trim().split(/\s+/); const out=[];
+    for(let i=0;i<tokens.length;){
+      const slice=tokens.slice(i); const parsed=wordsChunkToNumber(slice);
+      if (parsed){ out.push(parsed.value); i+=parsed.used; } else { out.push(tokens[i]); i++; }
+    }
+    return out.join(" ");
+  }
+
+  const voiceMap = [
+    ["multiplied by","*"],["divided by","/"],["to the power","^"],["raised to","^"],
+    ["open parenthesis","("],["open bracket","("],["left parenthesis","("],
+    ["close parenthesis",")"],["close bracket",")"],["right parenthesis",")"],
+    ["square root of","sqrt("],["root of","sqrt("],["square root","sqrt("],["root","sqrt("],
+    ["natural log","ln("],
+    ["plus","+"],["minus","-"],["times","*"],["multiply","*"],["into","*"],
+    ["divide","/"],["over","/"],["power","^"],["percent","%"],
+    ["point","."],["dot","."],
+    ["square","square("],["cube","cube("],
+    ["inverse","inv("],["one by","inv("],
+    ["factorial","!"],
+    ["sine","sin("],["sign","sin("],["cosine","cos("],["tangent","tan("],["tan","tan("],
+    ["log","log("],["ln","ln("],["absolute","abs("],["modulus","abs("],
+    ["pi","PI"],["pie","PI"],["e","E"],
+    ["plus or minus","neg("],["negative","neg("],
+    ["all clear","__CLR__"],["clear","__CLR__"],
+    ["backspace","__BK__"],["delete","__BK__"],
+    ["equals","__EQ__"],["equal","__EQ__"],["solve","__EQ__"],["result","__EQ__"]
+  ];
+  function applyVoiceMap(text){
+    var t=" " + (text||"").toLowerCase().trim() + " ";
+    t = toLatinDigits(t);
+    t = collapseNumberWords(t);
+    var ordered = voiceMap.slice().sort(function(a,b){ return b[0].length - a[0].length; });
+    for(var i=0;i<ordered.length;i++){
+      var k=ordered[i][0], v=ordered[i][1];
+      var re=new RegExp("\\b"+k.replace(/[.*+?^${}()|[\\]\\\\]/g,"\\$&")+"\\b","g");
+      t = t.replace(re, " "+v+" ");
+    }
+    return t.trim().replace(/\s+/g,"");
+  }
+  function appendVoice(norm){
+    function rmAll(s, frag){ while(s.indexOf(frag)!==-1){ s = s.split(frag).join(""); } return s; }
+    if (norm.indexOf("__CLR__")!==-1) { clearAll(); norm = rmAll(norm,"__CLR__"); }
+    if (norm.indexOf("__BK__")!==-1)  { doBackspace(); norm = rmAll(norm,"__BK__"); }
+    if (!norm) return;
+    var endsEq = norm.slice(-6)==="__EQ__";
+    norm = rmAll(norm,"__EQ__");
+    expression += norm;
+    preview();
+    if (endsEq) doEquals();
+  }
+  function initSpeech(){
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR){
+      liveText.textContent = "Voice not supported in this browser";
+      micBtn.disabled=true; return;
+    }
+    // Chrome blocks mic on HTTP (not localhost). Show a tip if needed.
+    const secure = (location.protocol==="https:" || location.hostname==="localhost");
+    if (!secure){
+      liveText.textContent = "Tip: For mic, open over HTTPS or localhost, then allow microphone.";
+    }
+    recognition = new SR();
+    recognition.lang = "en-IN";       // often best for Android; change if you prefer
+    recognition.interimResults = false; // final only
+    recognition.continuous = true;
+
+    recognition.onresult = (ev)=>{
+      var spoken=""; for (var i=ev.resultIndex;i<ev.results.length;i++){ var res=ev.results[i]; if (res.isFinal) spoken += (res[0].transcript + " "); }
+      spoken=spoken.trim(); if (!spoken) return;
+      liveText.textContent = "Heard: " + spoken;
+      const norm = applyVoiceMap(spoken);
+      appendVoice(norm);
+    };
+    recognition.onerror = (e)=>{ setStatus("Mic error"); console.warn(e.error); };
+    recognition.onend = ()=>{ recognizing=false; document.getElementById('micBox').classList.remove("active"); setStatus("Mic off"); };
+  }
+  document.getElementById('speak-btn').addEventListener("click", ()=>{
+    if (!recognition) initSpeech();
+    if (!recognition) return;
+    if (recognizing){ recognition.stop(); }
+    else{
+      recognition.start(); recognizing=true;
+      document.getElementById('micBox').classList.add("active");
+      setStatus("Listening…");
+      document.getElementById('liveText').textContent = "Listening… say: “square root of forty five equals”";
+    }
+  });
+
+  // Init
+  clearAll();
+})();
+</script>
+</body>
+</html>
